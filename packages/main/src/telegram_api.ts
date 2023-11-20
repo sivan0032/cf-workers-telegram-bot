@@ -117,6 +117,27 @@ export default class TelegramApi extends BotApi {
 			)
 		);
 
+	// trigger editMessage command of BotAPI
+	editMessageText = async (
+		chat_id: number,
+		message_id: number,
+		text: string
+	): Promise<Response> =>
+		fetch(
+			log(
+				addSearchParams(
+					new URL(
+						`${this.webhook.api.origin}${this.webhook.api.pathname}/editMessageText`
+					),
+					{
+						chat_id: chat_id.toString(),
+						message_id: message_id.toString(),
+						text,
+					}
+				).href
+			)
+		);
+
 	// trigger sendMessage command of BotAPI
 	sendMessage = async (
 		chat_id: number,

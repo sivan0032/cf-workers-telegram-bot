@@ -196,72 +196,69 @@ export default class TelegramBot extends TelegramApi {
 			return [];
 		})();
 
-		const response = await (async () => {
-			const { response } = await ai.run(
-				"@cf/mistral/mistral-7b-instruct-v0.1",
-				{
-					max_tokens: 1800,
-					messages: [
-						{
-							role: "system",
-							content: `Your name is ${this.bot_name}.`,
-						},
-						{
-							role: "system",
-							content: `You are talking to ${update.message?.from.first_name}.`,
-						},
-						{
-							role: "system",
-							content: `Your source code is at https://github.com/codebam/cf-workers-telegram-bot .`,
-						},
-						...old_messages,
-						{
-							role: "system",
-							content: `the current date is ${new Date().toString()}`,
-						},
-						{ role: "user", content: _prompt },
-					],
-				}
-			);
-			return response
-				.replace(/(\[|)(\/|)INST(S|)(s|)(\]|)/, "")
-				.replace(/<<(\/|)SYS>>/, "");
-		})();
+		const stream = await ai.run("@cf/mistral/mistral-7b-instruct-v0.1", {
+			stream: true,
+			max_tokens: 1800,
+			messages: [{ role: "user", content: _prompt }],
+		});
 
-		if (this.db) {
-			const { success } = await this.db
-				.prepare("INSERT INTO Messages (id, userId, content) VALUES (?, ?, ?)")
-				.bind(
-					crypto.randomUUID(),
-					update.inline_query
-						? update.inline_query.from.id
-						: update.message?.from.id,
-					"[INST] " + _prompt + " [/INST]" + "\n" + response
-				)
-				.run();
-			if (!success) {
-				console.log("failed to insert data into d1");
-			}
-		}
-
-		if (response === "") {
-			this.clear(update);
-			return this.question(update, args);
-		} // sometimes llama2 doesn't respond when given lots of system prompts
-
-		if (update.inline_query) {
-			return this.answerInlineQuery(update.inline_query.id, [
-				new TelegramInlineQueryResultArticle(response),
-			]);
-		}
-		return this.sendMessage(
+		const message = await this.sendMessage(
 			update.message?.chat.id ?? 0,
-			response,
+			"...",
 			"",
 			false,
 			false,
 			update.message?.message_id
 		);
+		const json: { result: { message_id: number; chat: { id: number } } } =
+			await message.json();
+		const message_id = json.result.message_id;
+		const chat_id = json.result.chat.id;
+
+		function ProcessSSE() {
+			let current = "";
+			return new TransformStream({
+				transform(t, c) {
+					const lines = t
+						.split("\n\n")
+						.map((line: any) => line.trim())
+						.filter((line: any) => !!line.length);
+					for (const line of lines) {
+						const data = line.slice(6);
+						if (data === "[DONE]") {
+							c.terminate();
+							return;
+						}
+						current += JSON.parse(data).response;
+						let eol = current.indexOf("\n");
+						while (eol !== -1) {
+							c.enqueue(current.slice(0, eol));
+							current = current.slice(eol + 1);
+							eol = current.indexOf("\n");
+						}
+					}
+				},
+				flush(c) {
+					c.enqueue(current);
+				},
+			});
+		}
+
+		let buffer = "";
+		const editMessageText = this.editMessageText;
+		await stream
+			.pipeThrough(new TextDecoderStream())
+			.pipeThrough(ProcessSSE())
+			.pipeTo(
+				new WritableStream({
+					async write(event) {
+						buffer += `${event}\n`;
+						console.log("writing");
+						await editMessageText(chat_id, message_id, buffer);
+					},
+				})
+			);
+		return new Response("ok");
 	};
 
 	// bot command: /paste
